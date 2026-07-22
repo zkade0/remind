@@ -1,0 +1,232 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+OS=$(uname -s)
+UDIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+SDIR="${XDG_CACHE_HOME:-$HOME/.cache}/remind"
+
+if [ "$OS" = Darwin ]; then
+  GDATE=$(command -v gdate || true)
+  BACKEND=reminders
+elif [ -d /run/systemd/system ]; then
+  BACKEND=systemd
+elif command -v at >/dev/null 2>&1; then
+  BACKEND=at
+else
+  BACKEND=sleep
+fi
+
+format_epoch() {
+  if [ "$OS" = Darwin ]; then date -r "$1" "$2"; else date -d "@$1" "$2"; fi
+}
+
+mac_parse_time() {
+  local value n unit day clock fmt
+  value=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
+  value=${value#in }
+  if [[ "$value" =~ ^([0-9]+)[[:space:]]+(minute|minutes|hour|hours|day|days|week|weeks)$ ]]; then
+    n=${BASH_REMATCH[1]}
+    case ${BASH_REMATCH[2]} in
+      minute|minutes) unit=M ;; hour|hours) unit=H ;; day|days) unit=d ;; week|weeks) unit=w ;;
+    esac
+    date -v+"$n$unit" +%s
+    return
+  fi
+
+  case "$value" in
+    tomorrow*) day=$(date -v+1d +%F); clock=${value#tomorrow} ;;
+    today*)    day=$(date +%F); clock=${value#today} ;;
+    [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]*) day=${value%% *}; clock=${value#"$day"} ;;
+    *)         day=$(date +%F); clock=$value ;;
+  esac
+  clock=${clock#"${clock%%[![:space:]]*}"}; clock=${clock#at }; clock=${clock// /}
+  if [ -z "$clock" ]; then
+    [ "$value" = tomorrow ] && { date -v+1d +%s; return; }
+    date -j -v0H -v0M -v0S -f '%Y-%m-%d' "$day" +%s 2>/dev/null
+    return
+  fi
+  case "$clock" in
+    *:*am|*:*pm) fmt='%Y-%m-%d %I:%M%p' ;;
+    *am|*pm)     date -j -v0M -v0S -f '%Y-%m-%d %I%p' "$day $clock" +%s 2>/dev/null; return ;;
+    *:*)         fmt='%Y-%m-%d %H:%M' ;;
+    *)           return 1 ;;
+  esac
+  date -j -v0S -f "$fmt" "$day $clock" +%s 2>/dev/null
+}
+
+parse_time() {
+  if [ "$OS" != Darwin ]; then
+    date -d "$1" +%s
+  elif [ -n "$GDATE" ]; then
+    "$GDATE" -d "$1" +%s
+  else
+    mac_parse_time "$1" || {
+      echo "can't parse time: $1 (try 'tomorrow 9am', '21:30', or 'in 20 minutes')" >&2
+      return 1
+    }
+  fi
+}
+
+reminders_add() {
+  local y mo d h mi s
+  read -r y mo d h mi s < <(format_epoch "$2" '+%Y %-m %-d %-H %-M %-S')
+  osascript - "$1" "$y" "$mo" "$d" "$h" "$mi" "$s" <<'APPLESCRIPT'
+on run argv
+  set reminderDate to current date
+  set day of reminderDate to 1
+  set year of reminderDate to (item 2 of argv as integer)
+  set month of reminderDate to (item 3 of argv as integer)
+  set day of reminderDate to (item 4 of argv as integer)
+  set time of reminderDate to ((item 5 of argv as integer) * hours + (item 6 of argv as integer) * minutes + (item 7 of argv as integer))
+  tell application "Reminders"
+    if not (exists list "remind") then make new list with properties {name:"remind"}
+    set r to make new reminder at end of reminders of list "remind" with properties {name:item 1 of argv, body:"Created by the remind command", due date:reminderDate, remind me date:reminderDate}
+    return id of r
+  end tell
+end run
+APPLESCRIPT
+}
+
+reminders_list() {
+  osascript <<'APPLESCRIPT'
+tell application "Reminders"
+  if not (exists list "remind") then return "(none)"
+  set rows to {}
+  repeat with r in (every reminder of list "remind" whose completed is false)
+    if remind me date of r is not missing value then set end of rows to (id of r) & tab & (remind me date of r as text) & tab & (name of r)
+  end repeat
+  if rows is {} then return "(none)"
+  set AppleScript's text item delimiters to linefeed
+  return rows as text
+end tell
+APPLESCRIPT
+}
+
+reminders_cancel() {
+  osascript - "$1" <<'APPLESCRIPT'
+on run argv
+  tell application "Reminders"
+    if not (exists list "remind") then return false
+    set matches to every reminder of list "remind" whose id is item 1 of argv
+    if matches is {} then return false
+    delete item 1 of matches
+    return true
+  end tell
+end run
+APPLESCRIPT
+}
+
+reap() {
+  case "$BACKEND" in
+    systemd)
+      local u lt changed=
+      for f in "$UDIR"/remind-*.timer; do
+        [ -e "$f" ] || continue
+        u=$(basename "$f" .timer)
+        lt=$(systemctl --user show "$u.timer" -p LastTriggerUSec --value 2>/dev/null)
+        [ -n "$lt" ] || continue
+        systemctl --user disable --now "$u.timer" >/dev/null 2>&1 || true
+        rm -f "$UDIR/$u.timer" "$UDIR/$u.service"; changed=1
+      done
+      [ -n "$changed" ] && systemctl --user daemon-reload || true ;;
+    at) : ;;
+    sleep)
+      local f pid
+      for f in "$SDIR"/remind-*; do
+        [ -e "$f" ] || continue
+        pid=$(cut -f1 "$f")
+        kill -0 "$pid" 2>/dev/null || rm -f "$f"
+      done ;;
+  esac
+}
+reap
+
+case "${1:-}" in
+  --reap) exit 0 ;;
+  --list|-l)
+    case "$BACKEND" in
+      reminders) reminders_list ;;
+      systemd) systemctl --user list-timers 'remind-*' --all --no-pager ;;
+      at)      atq ;;
+      sleep)   for f in "$SDIR"/remind-*; do [ -e "$f" ] || { echo "(none)"; break; }
+                 printf '%s  %s  %s\n' "$(basename "$f")" "$(format_epoch "$(cut -f2 "$f")" '+%a %F %H:%M')" "$(cut -f3 "$f")"; done ;;
+    esac
+    exit 0 ;;
+  --cancel|-c)
+    u="${2:?usage: remind --cancel <id>}"
+    case "$BACKEND" in
+      reminders) [ "$(reminders_cancel "$u")" = true ] || { echo "reminder not found: $u" >&2; exit 1; } ;;
+      systemd) u="${u%.timer}"
+               systemctl --user disable --now "$u.timer" >/dev/null 2>&1 || true
+               rm -f "$UDIR/$u.timer" "$UDIR/$u.service"; systemctl --user daemon-reload ;;
+      at)      atrm "$u" ;;
+      sleep)   [ -e "$SDIR/$u" ] && { kill "$(cut -f1 "$SDIR/$u")" 2>/dev/null || true; rm -f "$SDIR/$u"; } ;;
+    esac
+    echo "cancelled: $u"; exit 0 ;;
+  ""|--help|-h)
+    echo 'remind "message" <when>   e.g. remind "email Parker" tomorrow 9am'
+    echo '       remind --list       show pending reminders'
+    echo '       remind --cancel ID  cancel one (ID from --list)'
+    exit 0 ;;
+esac
+
+msg="${1:?usage: remind \"message\" <when>}"; shift
+when="$*"; [ -n "$when" ] || { echo 'usage: remind "message" <when>' >&2; exit 1; }
+when="${when#in }"; when="${when% tonight}"
+
+target=$(parse_time "$when") || exit 1
+now=$(date +%s)
+(( target > now )) || { echo "that time is in the past" >&2; exit 1; }
+unit="remind-$target-$$"
+
+case "$BACKEND" in
+  systemd|at|sleep) notify=$(command -v notify-send) || { echo "notify-send not found" >&2; exit 1; } ;;
+esac
+
+case "$BACKEND" in
+  reminders)
+    unit=$(reminders_add "$msg" "$target") || {
+      echo "couldn't create reminder; allow your terminal to control Reminders in System Settings > Privacy & Security > Automation" >&2
+      exit 1
+    } ;;
+
+  systemd)
+    esc=${msg//\\/\\\\}; esc=${esc//\"/\\\"}
+    oncal=$(format_epoch "$target" '+%Y-%m-%d %H:%M:%S')
+    mkdir -p "$UDIR"
+    cat > "$UDIR/$unit.service" <<EOF
+[Unit]
+Description=Reminder: $msg
+[Service]
+Type=oneshot
+ExecStart=$notify -u critical -a Reminder "Reminder" "$esc"
+EOF
+    cat > "$UDIR/$unit.timer" <<EOF
+[Unit]
+Description=Reminder timer: $msg
+[Timer]
+OnCalendar=$oncal
+Persistent=true
+[Install]
+WantedBy=timers.target
+EOF
+    systemctl --user daemon-reload
+    systemctl --user enable --now "$unit.timer" >/dev/null 2>&1 ;;
+
+  at)
+    q=${msg//\'/\'\\\'\'}
+    out=$(printf "%s\n" "$notify -u critical -a Reminder Reminder '$q'" | at -t "$(format_epoch "$target" '+%Y%m%d%H%M')" 2>&1)
+    unit=$(echo "$out" | awk '/job/{print $2; exit}')
+    [ -n "$unit" ] || { echo "at failed: $out" >&2; exit 1; } ;;
+
+  sleep)
+    echo "warning: no reboot-persistent scheduler here; this reminder dies on reboot/logout" >&2
+    q=${msg//\'/\'\\\'\'}
+    delta=$(( target - $(date +%s) ))
+    mkdir -p "$SDIR"
+    nohup sh -c "sleep $delta; $notify -u critical -a Reminder Reminder '$q'; rm -f '$SDIR/$unit'" >/dev/null 2>&1 &
+    printf '%s\t%s\t%s\n' "$!" "$target" "$msg" > "$SDIR/$unit"
+    disown 2>/dev/null || true ;;
+esac
+
+printf 'set: "%s"  ->  %s  (%s)\n' "$msg" "$(format_epoch "$target" '+%a %F %H:%M')" "$unit"
