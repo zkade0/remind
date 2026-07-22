@@ -6,10 +6,16 @@ Small reminder CLI for macOS and Linux.
 
 ```sh
 git clone https://github.com/zkade0/remind.git
-install -m 755 remind/remind ~/.local/bin/remind
+cd remind
+mkdir -p "$HOME/.local/bin"
+install -m 755 remind "$HOME/.local/bin/remind"
 ```
 
-Ensure `~/.local/bin` is in `PATH`.
+This installs only for your user on macOS or Linux. If needed, add this to your shell profile:
+
+```sh
+export PATH="$HOME/.local/bin:$PATH"
+```
 
 ## Use
 
