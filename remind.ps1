@@ -2,6 +2,7 @@
 [CmdletBinding(DefaultParameterSetName = 'Set')]
 param(
     [Parameter(Mandatory, Position = 0, ParameterSetName = 'Set')]
+    [ValidateLength(1, 512)]
     [string]$Message,
 
     [Parameter(Mandatory, Position = 1, ValueFromRemainingArguments, ParameterSetName = 'Set')]
@@ -13,7 +14,10 @@ param(
 
     [Parameter(Mandatory, ParameterSetName = 'Cancel')]
     [Alias('c')]
-    [string]$Cancel
+    [string]$Cancel,
+
+    [Parameter(Mandatory, ParameterSetName = 'SelfTest')]
+    [switch]$SelfTest
 )
 
 Set-StrictMode -Version Latest
@@ -56,7 +60,8 @@ function Resolve-ReminderTime {
 }
 
 function Get-ReminderTasks {
-    @(Get-ScheduledTask -TaskName 'remind-*' -ErrorAction SilentlyContinue)
+    @(Get-ScheduledTask -TaskName 'remind-*' -ErrorAction SilentlyContinue |
+        Where-Object { $_.Description -and $_.Description.StartsWith('[remind] ') })
 }
 
 function Remove-FiredTasks {
@@ -66,6 +71,17 @@ function Remove-FiredTasks {
             Unregister-ScheduledTask -TaskName $task.TaskName -Confirm:$false
         }
     }
+}
+
+if ($SelfTest) {
+    $relative = Resolve-ReminderTime 'in 30 seconds'
+    if ($relative -lt (Get-Date).AddSeconds(25)) { throw 'relative time test failed' }
+    $tomorrow = Resolve-ReminderTime 'tomorrow 9am'
+    if ($tomorrow.Date -ne (Get-Date).Date.AddDays(1) -or $tomorrow.Hour -ne 9) { throw 'tomorrow test failed' }
+    $clock = Resolve-ReminderTime '21:30'
+    if ($clock.Hour -ne 21 -or $clock.Minute -ne 30) { throw 'clock test failed' }
+    Write-Output 'self-test: OK'
+    exit
 }
 
 if ($env:OS -ne 'Windows_NT') {
@@ -88,10 +104,11 @@ if ($List) {
 }
 
 if ($Cancel) {
-    if ($Cancel -notlike 'remind-*' -or -not (Get-ScheduledTask -TaskName $Cancel -ErrorAction SilentlyContinue)) {
+    $task = Get-ReminderTasks | Where-Object TaskName -eq $Cancel
+    if (-not $task) {
         throw "reminder not found: $Cancel"
     }
-    Unregister-ScheduledTask -TaskName $Cancel -Confirm:$false
+    Unregister-ScheduledTask -TaskName $task.TaskName -Confirm:$false
     Write-Output "cancelled: $Cancel"
     exit
 }
@@ -120,6 +137,8 @@ $toastBase64 = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($toas
 $fire = @"
 `$xmlText = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('$toastBase64'))
 [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] > `$null
+[Windows.UI.Notifications.ToastNotification, Windows.UI.Notifications, ContentType = WindowsRuntime] > `$null
+[Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime] > `$null
 `$xml = New-Object Windows.Data.Xml.Dom.XmlDocument
 `$xml.LoadXml(`$xmlText)
 `$toast = [Windows.UI.Notifications.ToastNotification]::new(`$xml)

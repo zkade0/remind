@@ -28,6 +28,7 @@ git clone --branch windows-powershell https://github.com/zkade0/remind.git
 Set-Location remind
 New-Item -ItemType Directory -Force "$HOME\bin" | Out-Null
 Copy-Item remind.ps1 "$HOME\bin\remind.ps1"
+& .\remind.ps1 -SelfTest
 ```
 
 Add `%USERPROFILE%\bin` to your user `PATH`, then reopen PowerShell.
