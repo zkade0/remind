@@ -19,6 +19,8 @@ This installs only for your user on macOS or Linux. If needed, add this to your 
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
+Check the time parser with `remind --self-test`.
+
 ### Windows
 
 From PowerShell:
