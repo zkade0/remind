@@ -173,9 +173,9 @@ case "${1:-}" in
       reminders) reminders_list ;;
       systemd) systemctl --user list-timers 'remind-*' --all --no-pager ;;
       at)      for f in "$SDIR"/at-*; do [ -e "$f" ] || { echo "(none)"; break; }
-                 printf '%s  %s  %s\n' "${f##*/at-}" "$(format_epoch "$(cut -f1 "$f")" '+%a %F %H:%M')" "$(cut -f2- "$f")"; done ;;
+                 printf '%s  %s  %s\n' "${f##*/at-}" "$(format_epoch "$(cut -f1 "$f")" '+%a %F %H:%M' 2>/dev/null || echo '?')" "$(cut -f2- "$f")"; done ;;
       sleep)   for f in "$SDIR"/remind-*; do [ -e "$f" ] || { echo "(none)"; break; }
-                 printf '%s  %s  %s\n' "$(basename "$f")" "$(format_epoch "$(cut -f2 "$f")" '+%a %F %H:%M')" "$(cut -f3- "$f")"; done ;;
+                 printf '%s  %s  %s\n' "$(basename "$f")" "$(format_epoch "$(cut -f2 "$f")" '+%a %F %H:%M' 2>/dev/null || echo '?')" "$(cut -f3- "$f")"; done ;;
     esac
     exit 0 ;;
   --cancel|-c)
